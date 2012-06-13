@@ -894,9 +894,9 @@ enyo.kind({
 		}
 		components = components || this.kindComponents || [];
 		this.inherited(arguments);
-		this.$.scroll.kFrictionDamping = 0.75;
-		this.$.scroll.kSpringDamping = 0.8;
-		this.$.scroll.kFrictionEpsilon = 0.1;
+		//this.$.scroll.kFrictionDamping = 0.75;
+		//this.$.scroll.kSpringDamping = 0.8;
+		//this.$.scroll.kFrictionEpsilon = 0.1;
 		this.views = this.views.length ? this.views : components;
 		this.viewsChanged();
 	},
