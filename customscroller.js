@@ -1,5 +1,3 @@
-var ISPHONE = true
-
 enyo.kind({
 name: "CustomScrollStrategy",
 kind: enyo.Component,
@@ -12,7 +10,7 @@ onScrollStart: "scrollStart",
 onScroll: "scroll",
 onScrollStop: "scrollStop"
 },
-kSpringDamping: .93,
+kSpringDamping: .5,
 kDragDamping: .5,
 kFrictionDamping: .97,
 kSnapFriction: .9,
@@ -116,10 +114,10 @@ var vy = (this.y - this.flicky) / dragT1 * 1200;
 var v = Math.sqrt(vx*vx + vy*vy);
 
 if (v > 600 && dragT1 < 300) {
-	if (ISPHONE) {
+	/*if (ISPHONE) {
 		vx=vx*2
 		vy=vy*2
-	}
+	}*/
     this.flick({xVel:vx, yVel:vy});
 }
 },
@@ -246,6 +244,522 @@ enyo.kind({
 	}
 });
 
+//* @protected
+enyo.kind({
+	name: "CustomVirtualScroller",
+	kind: "CustomDragScroller",
+	events: {
+		onScroll: ""
+	},
+	published: {
+		/**
+		Use accelerated scrolling.
+		*/
+		accelerated: false
+	},
+	className: "enyo-virtual-scroller",
+	//* @protected
+	tools: [
+		{name: "scroll", kind: "CustomScrollStrategy", topBoundary: 1e9, bottomBoundary: -1e9}
+	],
+	chrome: [
+		// fitting div to prevent layout leakage
+		{className: "enyo-fit", components: [
+			// important for compositing that this height be fixed, as to avoid reallocating textures
+			{name: "content", height: "2048px"}
+		]}
+	],
+	//
+	// custom sliding-buffer
+	//
+	top: 0,
+	bottom: -1,
+	pageTop: 0,
+	pageOffset: 0,
+	contentHeight: 0,
+	constructor: function() {
+		this.heights = [];
+		this.inherited(arguments);
+	},
+	create: function() {
+		this.inherited(arguments);
+		this.acceleratedChanged();
+	},
+	rendered: function() {
+		this.inherited(arguments);
+		this.measure();
+		this.$.scroll.animate();
+		// animate will not do anything if the object is in steady-state
+		// so we ensure we have filled our display buffer here
+		this.updatePages();
+	},
+	acceleratedChanged: function() {
+		var p = this.pageTop;
+		this.pageTop = 0;
+		if (this.effectScroll) {
+			this.effectScroll();
+		}
+		this.pageTop = p;
+		this.effectScroll = this.accelerated ? this.effectScrollAccelerated : this.effectScrollNonAccelerated;
+		this.$.content.applyStyle("margin", this.accelerated ? null : "900px 0");
+		this.$.content.addRemoveClass("enyo-accel-children", this.accelerated);
+		this.effectScroll();
+	},
+	measure: function() {
+		//this.unlockClipRegion();
+		this.viewNode = this.hasNode();
+		if (this.viewNode) {
+			this.viewHeight = this.viewNode.clientHeight;
+		}
+	},
+	//
+	// prompt the scroller to start.
+	start: function() {
+		this.$.scroll.start();
+	},
+	//
+	// FIXME: Scroller's shiftPage/unshiftPage/pushPage/popPage are implemented via adjustTop/adjustBottom
+	// Conversely, Buffer's adjustTop/adjustBottom are implemented via shift/unshift/push/pop
+	// Presumably there is a less confusing way of factoring or naming the methods.
+	//
+	// abstract: subclass must supply
+	adjustTop: function(inTop) {
+	},
+	// abstract: subclass must supply
+	adjustBottom: function(inBottom) {
+	},
+	// add a page to the top of the window
+	unshiftPage: function() {
+		var t = this.top - 1;
+		if (this.adjustTop(t) === false) {
+			return false;
+		}
+		this.top = t;
+	},
+	// remove a page from the top of the window
+	shiftPage: function() {
+		this.adjustTop(++this.top);
+	},
+	// add a page to the top of the window
+	pushPage: function() {
+		//this.log(this.top, this.bottom);
+		var b = this.bottom + 1;
+		if (this.adjustBottom(b) === false) {
+			return false;
+		}
+		this.bottom = b;
+	},
+	// remove a page from the top of the window
+	popPage: function() {
+		this.adjustBottom(--this.bottom);
+	},
+	//
+	// NOTES:
+	//
+	// pageOffset represents the scroll-distance in the logical display (from ScrollManager's perspective)
+	// that is hidden from the real display (via: display: none). It's measured as pixels above the origin, so
+	// the value is <= 0.
+	//
+	// pageTop is the scroll position on the real display, also <= 0.
+	//
+	// show pages that have scrolled in from the bottom
+	pushPages: function() {
+		// contentHeight is the height of displayed DOM pages
+		// pageTop is the actual scrollTop for displayed DOM pages (negative)
+		while (this.contentHeight + this.pageTop < this.viewHeight) {
+			if (this.pushPage() === false) {
+				this.$.scroll.bottomBoundary = Math.min(-this.contentHeight + this.pageOffset + this.viewHeight, -1);
+				break;
+			}
+			// NOTE: this.heights[this.bottom] can be undefined if there is no data to render, and therefore no nodes at this.bottom
+			this.contentHeight += this.heights[this.bottom] || 0;
+		}
+	},
+	// hide pages that have scrolled off of the bottom
+	popPages: function() {
+		// NOTE: this.heights[this.bottom] can be undefined if there is no data to render, and therefore no nodes at this.bottom
+		var h = this.heights[this.bottom];
+		while (h !== undefined && this.bottom && this.contentHeight + this.pageTop - h > this.viewHeight) {
+			this.popPage();
+			this.contentHeight -= h;
+			h = this.heights[this.bottom];
+		}
+	},
+	// hide pages that have scrolled off the top
+	shiftPages: function() {
+		// the height of the first (displayed) page
+		var h = this.heights[this.top];
+		while (h !== undefined && h < -this.pageTop) {
+			// increase the distance from the logical display that is hidden from the real display
+			this.pageOffset -= h;
+			// decrease the distance representing the scroll position on the real display
+			this.pageTop += h;
+			// decrease the height of the real display
+			this.contentHeight -= h;
+			// process the buffer movement
+			this.shiftPage();
+			// the height of the new first page
+			h = this.heights[this.top];
+		}
+	},
+	// show pages that have scrolled in from the top
+	unshiftPages: function() {
+		while (this.pageTop > 0) {
+			if (this.unshiftPage() === false) {
+				this.$.scroll.topBoundary = this.pageOffset;
+				this.$.scroll.bottomBoundary = -9e9;
+				break;
+			}
+			// note: if h is zero we will loop again
+			var h = this.heights[this.top];
+			if (h === undefined) {
+				this.top++;
+				return;
+			}
+			this.contentHeight += h;
+			this.pageOffset += h;
+			this.pageTop -= h;
+		}
+	},
+	updatePages: function() {
+		if (!this.viewNode) {
+			return;
+		}
+		// re-query viewHeight every iteration
+		// querying DOM can cause a synchronous layout
+		// but commonly there is no dirty layout at this time.
+		this.viewHeight = this.viewNode.clientHeight;
+		if (this.viewHeight <= 0) {
+			return;
+		}
+		//
+		// recalculate boundaries every iteration
+		var ss = this.$.scroll;
+		ss.topBoundary = 9e9;
+		ss.bottomBoundary = -9e9;
+		//
+		// show pages that have scrolled in from the bottom
+		this.pushPages();
+		// hide pages that have scrolled off the bottom
+		this.popPages();
+		// show pages that have scrolled in from the top
+		this.unshiftPages();
+		// hide pages that have scrolled off the top
+		this.shiftPages();
+		//
+		// pageTop can change as a result of updatePages, so we need to perform content translation
+		// via effectScroll
+		// scroll() method doesn't call effectScroll because we call it here
+		this.effectScroll();
+	},
+	scroll: function() {
+		// calculate relative pageTop
+		var pt = Math.round(this.$.scroll.y) - this.pageOffset;
+		if (pt == this.pageTop) {
+			return;
+		}
+		// page top drives all page rendering / discarding
+		this.pageTop = pt;
+		// add or remove pages from either end to satisfy display requirements
+		this.updatePages();
+		// perform content translation
+		this.doScroll();
+	},
+	// NOTE: there are a several ways to effect content motion.
+	// The 'transform' method in combination with hardware acceleration promises
+	// the smoothest animation, but hardware acceleration in combination with the
+	// trick-scrolling gambit implemented here produces visual artifacts.
+	// In the absence of hardware acceleration, scrollTop appears to be the fastest method.
+	effectScrollNonAccelerated: function() {
+		//webosEvent.event('', 'enyo:effectScrollNonAccelerated', '');
+		if (this.hasNode()) {
+			this.node.scrollTop = 900 - this.pageTop;
+		}
+	},
+	effectScrollAccelerated: function() {
+		//webosEvent.event('', 'enyo:effectScrollAccelerated', '');
+		var n = this.$.content.hasNode();
+		if (n) {
+			n.style.webkitTransform = 'translate3d(0,' + this.pageTop + 'px,0)';
+		}
+	}
+});
+
+
+//* @protected
+enyo.kind({
+	name: "CustomBufferedScroller",
+	kind: "CustomVirtualScroller",
+	rowsPerPage: 1,
+	events: {
+		onGenerateRow: "generateRow",
+		onAdjustTop: "",
+		onAdjustBottom: ""
+	},
+	//* @protected
+	constructor: function() {
+		this.pages = [];
+		this.inherited(arguments);
+	},
+	create: function() {
+		this.inherited(arguments);
+		this.createDomBuffer();
+		this.createDisplayBuffer();
+	},
+	createDomBuffer: function() {
+		this.domBuffer = this.createComponent({
+			kind: enyo.DomBuffer,
+			rowsPerPage: this.rowsPerPage,
+			pages: this.pages,
+			margin: 20,
+			generateRow: enyo.hitch(this, "doGenerateRow")
+		});
+	},
+	createDisplayBuffer: function() {
+		this.displayBuffer = new enyo.DisplayBuffer({
+			heights: this.heights,
+			pages: this.pages
+		});
+	},
+	rendered: function() {
+		this.domBuffer.pagesNode = this.$.content.hasNode();
+		this.inherited(arguments);
+	},
+	pageToTopRow: function(inPage) {
+		return inPage * this.rowsPerPage;
+	},
+	pageToBottomRow: function(inPage) {
+		return inPage * this.rowsPerPage + (this.rowsPerPage - 1);
+	},
+	//* @public
+	adjustTop: function(inTop) {
+		this.doAdjustTop(this.pageToTopRow(inTop));
+		if (this.domBuffer.adjustTop(inTop) === false) {
+			return false;
+		}
+		this.displayBuffer.adjustTop(inTop);
+	},
+	adjustBottom: function(inBottom) {
+		this.doAdjustBottom(this.pageToBottomRow(inBottom));
+		if (this.domBuffer.adjustBottom(inBottom) === false) {
+			return false;
+		}
+		this.displayBuffer.adjustBottom(inBottom);
+	},
+	findBottom: function() {
+		while (this.pushPage() !== false) {};
+		this.contentHeight = this.displayBuffer.height;
+		var bb = Math.min(-this.contentHeight + this.pageOffset + this.viewHeight, -1);
+		this.$.scroll.bottomBoundary = this.$.scroll.y = this.$.scroll.y0 = bb;
+		this.scroll();
+	},
+	refreshPages: function() {
+		// flush all DOM nodes
+		this.domBuffer.flush();
+		// domBuffer top/bottom are linked to scroller top/bottom because
+		// scroller shiftPages/popPages rely on top/bottom referring to known
+		// regions
+		this.bottom = this.top - 1;
+		this.displayBuffer.bottom = this.domBuffer.bottom = this.bottom;
+		this.displayBuffer.top = this.domBuffer.top = this.top;
+		// clear metrics
+		this.contentHeight = 0;
+		this.displayBuffer.height = 0;
+		this.heights = this.displayBuffer.heights = [];
+		// rebuild pages
+		this.updatePages();
+	},
+	punt: function() {
+		this.$.scroll.stop();
+		this.bottom = -1;
+		this.top = 0;
+		this.domBuffer.flush();
+		this.displayBuffer.bottom = this.domBuffer.bottom = this.bottom;
+		this.displayBuffer.top = this.domBuffer.top = this.top;
+		this.contentHeight = 0;
+		this.displayBuffer.height = 0;
+		this.heights = this.displayBuffer.heights = [];
+		this.pageOffset = 0;
+		this.pageTop = 0;
+		this.$.scroll.y = this.$.scroll.y0 = 0;
+		// rebuild pages
+		this.updatePages();
+	}
+});
+
+/**
+	Manages a long list by rendering only small portions of the list at a time.
+	Uses flyweight strategy via onSetupRow.
+	We suggest users stick to the derived kind VirtualList instead.
+	VirtualList introduces a paging strategy for backing data, but it can be 
+	ignored if it's not needed.
+*/
+enyo.kind({
+	name: "CustomScrollingList",
+	kind: enyo.VFlexBox,
+	events: {
+		/** sent with arguments (inSender,inIndex) to ask owner to prepare the row with specificed index by 
+			setting the properties of the objects in the list's components.  Return true if you should keep
+			getting more onSetupRow events for more items. */
+		onSetupRow: ""
+	},
+	rowsPerScrollerPage: 1,
+	//* @protected
+	controlParentName: "list",
+	initComponents: function() {
+		this.createComponents([
+			{flex: 1, name: "scroller", kind: "CustomBufferedScroller", rowsPerPage: this.rowsPerScrollerPage, onGenerateRow: "generateRow", onAdjustTop: "adjustTop", onAdjustBottom: "adjustBottom", components: [
+				{name: "list", kind: enyo.RowServer, onSetupRow: "setupRow"}
+			]}
+		]);
+		this.inherited(arguments);
+	},
+	generateRow: function(inSender, inRow) {
+		return this.$.list.generateRow(inRow);
+	},
+	setupRow: function(inSender, inRow) {
+		return this.doSetupRow(inRow);
+	},
+	rendered: function() {
+		this.inherited(arguments);
+		// allow access to flyweight node after rendering or refreshing;
+		// ensures, for example, that any dynamically added controls do not have 
+		// a node access state out of sync with flyweight
+		this.$.list.enableNodeAccess();
+	},
+	//* @public
+	//* move the active index of the list to inIndex where it can be altered
+	prepareRow: function(inIndex) {
+		return this.$.list.prepareRow(inIndex);
+	},
+	//* indicate that a row has changed so the onSetupRow callback will be called for it
+	updateRow: function(inIndex) {
+		this.prepareRow(inIndex);
+		this.setupRow(this, inIndex);
+	},
+	//* return the index of the active row
+	fetchRowIndex: function() {
+		return this.$.list.fetchRowIndex();
+	},
+	//* adjust rendering buffers to fit display
+	update: function() {
+		this.$.scroller.updatePages();
+	},
+	/** redraw any visible items in the list to reflect data changes without
+		adjusting the list positition */
+	refresh: function() {
+		this.$.list.saveCurrentState();
+		this.$.scroller.refreshPages();
+		this.$.list.enableNodeAccess();
+	},
+	//* clear the list's internal state and refresh
+	reset: function() {
+		// dump state buffer
+		this.$.list.clearState();
+		// stop scroller animation
+		this.$.scroller.$.scroll.stop();
+		// dump and rebuild rendering buffers
+		this.refresh();
+	},
+	//* completely reset the list so that it reloads all data and rerenders
+	punt: function() {
+		// dump state buffer
+		this.$.list.clearState();
+		// dump rendering buffers and locus data, rebuild from start state
+		this.$.scroller.punt();
+	}
+});
+
+enyo.kind({
+	name: "CustomVirtualList",
+	kind: "CustomScrollingList",
+	published: {
+		lookAhead: 2,
+		pageSize: 10
+	},
+	events: {
+		onAcquirePage: "",
+		onDiscardPage: ""
+	},
+	//* @protected
+	initComponents: function() {
+		this.inherited(arguments);
+		this.createComponents([
+			{kind: "Selection", onClear: "selectionCleared", onDeselect: "updateRowSelection", onSelect: "updateRowSelection"},
+			{kind: "Buffer", overbuffer: this.lookAhead, margin: 3, onAcquirePage: "doAcquirePage", onDiscardPage: "doDiscardPage"}
+		]);
+	},
+	//* @public
+	/** 
+	 Set the selection state for the given row index. 
+	*/
+	select: function(inRowIndex, inData) {
+		return this.$.selection.select(inRowIndex, inData);
+	},
+	/** 
+	 Get the selection state for the given row index.
+	*/
+	isSelected: function(inRowIndex) {
+		return this.$.selection.isSelected(inRowIndex);
+	},
+	/** 
+	 Enable/disable multi-select mode
+	*/
+	setMultiSelect: function(inMulti) {
+		this.$.selection.setMulti(inMulti);
+		this.refresh();
+	},
+	/** 
+	Returns the selection component (<a href="#enyo.Selection">enyo.Selection</a>) that manages the selection
+	state for this list.
+	*/
+	getSelection: function() {
+		return this.$.selection;
+	},
+	//* @protected
+	updateRowSelection: function(inSender, inRowIndex) {
+		this.updateRow(inRowIndex);
+	},
+	resizeHandler: function() {
+		if (this.hasNode()) {
+			//this.log();
+			this.$.scroller.measure();
+			// FIXME: if we refresh, then we always re-render the dom, which seems 
+			// unncessary and over-aggressive.
+			// if we merely update, then we don't blap away a rendering if list is hidden.
+			// in addition, it's more compatible with controls that have a render-specific state like editors
+			//this.update();
+			this.refresh();
+			this.$.scroller.start();
+		} else {
+			this.log("no node");
+		}
+	},
+	//* @protected
+	rowToPage: function(inRowIndex) {
+		return Math.floor(inRowIndex / this.pageSize);
+	},
+	adjustTop: function(inSender, inTop) {
+		var page = this.rowToPage(inTop);
+		this.$.buffer.adjustTop(page);
+	},
+	adjustBottom: function(inSender, inBottom) {
+		var page = this.rowToPage(inBottom);
+		this.$.buffer.adjustBottom(page);
+	},
+	reset: function() {
+		this.$.buffer.bottom = this.$.buffer.top - 1;
+		this.inherited(arguments);
+	},
+	punt: function() {
+		var b = this.$.buffer;
+		// dump data buffer
+		b.flush();
+		b.top = b.specTop = 0;
+		b.bottom = b.specBottom = -1;
+		this.inherited(arguments);
+	}
+});
 
 enyo.kind({
 	name: "CustomBasicScroller",
@@ -268,7 +782,8 @@ enyo.kind({
 		/**
 		Use accelerated scrolling.
 		*/
-		accelerated: true
+		accelerated: true,
+		scrim: true
 	},
 	events: {
 		/**
@@ -290,6 +805,8 @@ enyo.kind({
 	},
 	className: "enyo-scroller",
 	//* @protected
+	
+	scrimTools: [{kind: "Scrim",name: "scrim",animateShowing: false, style: "z-index: 1;", showing: false}],
 	chrome: [
 		{name: "client"}
 	],
@@ -300,6 +817,7 @@ enyo.kind({
 		});
 		this.fpsShowingChanged();
 		this.acceleratedChanged();
+		this.scrimChanged();
 	},
 	rendered: function() {
 		this.inherited(arguments);
@@ -310,6 +828,29 @@ enyo.kind({
 		if (this.hasNode()/* && !this.preventScrollAtRendered*/) {
 			enyo.asyncMethod(this.$.scroll, "start");
 		}
+	},
+	scrimChanged: function() {
+		if (this.scrim && !this.$.scrim) {
+		this.makeScrim();
+		}
+		if (!this.scrim && this.$.scrim) {
+		this.$.scrim.destroy();
+		}
+	},
+	makeScrim: function() {
+		// reset control parent so scrim doesn't go into client.
+		/*var cp = this.parent;
+		this.parent = null;*/
+		this.createChrome(this.scrimTools);
+		/*this.parent = cp;
+		var cn = this.container.hasNode();
+		// render scrim in container, strategy has no dom.
+		console.error("CONTAIN NODE:" + cn + " cp: " + cp)
+		if (cn) {
+			console.error("CREATING SCRIM:")*/
+		//this.$.scrim.parentNode = cn;
+		this.$.scrim.render();
+		//}
 	},
 	// we choose not to let reported offset be out of bounds
 	// so when overscrolling, adjust offset to be reported as if it's in bounds
@@ -399,7 +940,11 @@ enyo.kind({
 		this.effectScroll();
 	},
 	start: function() {
+		if (this.scrim) {
+			this.$.scrim.show();
+			}
 		this.$.scroll.start();
+		
 	},
 	stop: function() {
 		if (this.isScrolling()) {
@@ -411,10 +956,30 @@ enyo.kind({
 				this.stabilize();
 			}
 		}
+		if (this.scrim ) {
+			this.$.scrim.hide();
+			}
 	},
 	dragstartHandler: function(inSender, inEvent) {
 		this.calcBoundaries();
 		this.calcAutoScrolling();
+		return this.inherited(arguments);
+	},
+	dragHandler: function(inSender, inEvent) {
+		if (this.dragging) {
+			if (this.scrim) {
+				this.$.scrim.show();
+			}
+		}
+		return this.inherited(arguments);
+	},
+	dragfinishHandler: function(inSender, inEvent) {
+		if (this.dragging) {
+		
+		if (this.scrim && this.isScrolling() == false) {
+		this.$.scrim.hide();
+		}
+		}
 		return this.inherited(arguments);
 	},
 	// this event comes from the 'scroll' object, it is fired
@@ -443,6 +1008,9 @@ enyo.kind({
 			this.broadcastToControls("offsetChanged");
 			this.needsOffsetBroadcast = false;
 		}
+		if (this.scrim ) {
+			this.$.scrim.hide();
+			}
 		this.doScrollStop();
 	},
 	effectScrollAccelerated: function() {
@@ -690,7 +1258,7 @@ this.setFriction();
 
 },
 setFriction: function() {
-	if (ISPHONE) {
+	if (!ISPHONE) {
 		this.$.scroll.kFrictionDamping = 0.55;
 	}
 	else {
@@ -750,6 +1318,7 @@ if (this.isInOverScroll && this.pos > 0) {
 },
 scrollStop: function() {
 	//console.error("SCROLLSTOP1")
+	enyo.scrim.hide();
 if (this.snapping) {
 this.snapping = false;
 if (this.index != this.oldIndex) {
@@ -757,7 +1326,7 @@ if (this.index != this.oldIndex) {
 // force to scoll exactly to the exact pos
 var p = this.getCurrentPos();
 //this.error(this.snapPos + ", " + p)
-if ((this.snapPos != p && Math.abs(this.snapPos - p) < 1) || ISPHONE) {
+if ((this.snapPos != p && Math.abs(this.snapPos - p) < 1) || !ISPHONE) {
 this.scrollToDirect(this.snapPos);
 //console.error("SCROLLSTOP2")
 }
@@ -767,6 +1336,7 @@ this.inherited(arguments);
 }
 },
 snapFinish: function() {
+//enyo.scrim.hide();
 this.doSnapFinish();
 },
 snapScrollTo: function(inPos) {
@@ -816,6 +1386,7 @@ return c.hasNode()["offset" + (this.scrollH ? "Left" : "Top")] - this.revealAmou
 snap: function() {
 var i = this.calcSnapScroll();
 if (i !== undefined) {
+	//enyo.scrim.show();
 this.snapTo(i);
 }
 },
@@ -856,349 +1427,182 @@ next: function() {
 }
 });
 
+enyo.kind({
+	name: "CustomMenu",
+	kind: enyo.Popup,
+	published: {
+		// whenever the menu is opened, any sub-items will be shown closed
+		autoCloseSubItems: true
+	},
+	modal: true,
+	showFades: true,
+	className: "enyo-popup enyo-popup-menu",
+	chrome: [
+		{name: "client", className: "enyo-menu-inner", kind: "CustomBasicScroller", onScroll: "scrollerScroll", autoVertical: true, vertical: false, layoutKind: "OrderedLayout"}
+	],
+	defaultKind: "MenuItem",
+	//* @protected
+	create: function() {
+		this.inherited(arguments);
+		this.styleLastItem();
+		if (this.showFades) {
+			this.createChrome([{kind: "ScrollFades", className: "enyo-menu-scroll-fades", topFadeClassName: "enyo-menu-top-fade", bottomFadeClassName: "enyo-menu-bottom-fade", leftFadeClassName: "", rightFadeClassName: ""}]);
+		}
+	},
+	removeControl: function(inControl) {
+		this.inherited(arguments);
+		if (inControl == this._lastItem) {
+			this._lastItem = null;
+		}
+	},
+	destroyControls: function() {
+		this._lastItem = null;
+		this.inherited(arguments);
+	},
+	showingChanged: function() {
+		if (this.showing) {
+			if (this.autoCloseSubItems) {
+				for (var i=0, c$=this.getControls(), c; c=c$[i]; i++) {
+					enyo.call(c, "closeAll");
+				}
+			}
+		}
+		this.inherited(arguments);
+	},
+	scrollerScroll: function() {
+		this.$.scrollFades && this.$.scrollFades.showHideFades(this.$.client);
+	},
+	fetchItemByValue: function(inValue) {
+		var items = this.getControls();
+		for (var i=0, c; c=items[i]; i++) {
+			if (c.getValue && c.getValue() == inValue) {
+				return c;
+			}
+		}
+	},
+	scrollIntoView: function(inY, inX) {
+		this.$.client.scrollIntoView(inY, inX);
+		this.$.client.calcAutoScrolling();
+	},
+	flow: function() {
+		this.inherited(arguments);
+		this.styleLastItem();
+	},
+	_locateLastItem: function(inControl) {
+		if (inControl.getOpen && !inControl.getOpen()) {
+			return inControl;
+		} else {
+			var controls = inControl.getControls();
+			var c = controls.length;
+			return c ? this._locateLastItem(controls[c-1]) : inControl;
+		}
+	},
+	locateLastItem: function() {
+		return this._locateLastItem(this);
+	},
+	// NOTE: dynamically style the very bottom visible menu item
+	// this is so that we can make sure to hide any bottom border.
+	styleLastItem: function() {
+		if (this._lastItem && !this._lastItem.destroyed) {
+			this._lastItem.addRemoveMenuLastStyle(false);
+		}
+		var b = this.locateLastItem();
+		if (b && b.addRemoveMenuLastStyle) {
+			b.addRemoveMenuLastStyle(true);
+			this._lastItem = b;
+		}
+	}
+});
+
 /**
-A control that provides the ability to slide back and forth between different views.
-If you have many views in the carousel, use <a href="#enyo.Carousel">Carousel</a>.
+A <a href="#enyo.Menu">Menu</a> with support for selection.
 
-	{kind: "BasicCarousel", flex: 1, components: [
-		{kind: "View1"},
-		{kind: "View2"},
-		{kind: "View3"}
-	]}
+	{kind: "PopupSelect", onSelect: "popupSelect"}
 
-The default orientation of BasicCarousel is horizontal.  You can change to vertical by setting <code>layoutKind</code> to "VFlexLayout".
+The onSelect event is fired when a selection is made, like so:
 
-	{kind: "BasicCarousel", layoutKind: "VFlexLayout", flex: 1, components: [
-		{kind: "View1"},
-		{kind: "View2"},
-		{kind: "View3"}
-	]}
+	popupSelect: function(inSender, inSelected) {
+		var value = inSelected.getValue();
+	}
 */
 enyo.kind({
-	name: "CustomBasicCarousel",
-	kind: "CustomSnapScroller",
+	name: "CustomPopupSelect",
+	kind: "CustomMenu",
 	published: {
-		views: [],
-		dragSnapThreshold: 0.01
+		/**
+		An array of config objects or strings representing items. Note, specified components are 
+		automatically added to the items array.
+		Items are owned by the PopupSelect and therefore event handlers should not be specified on them.
+		Use the onSelect event to respond to an item selection.
+		*/
+		items: [],
+		selected: null
 	},
-	//
-	chrome: [
-		{name: "client", kind: "Control"/*, style: "position: absolute;"*/}
-	],
+	events: {
+		onSelect: ""
+	},
+	className: "enyo-popup enyo-popup-menu enyo-popupselect",
+	canCreateItems: false,
 	//* @protected
-	create: function(inProps) {
-		var components = [];
-		if (inProps) {
-			components = inProps.components;
-			delete inProps.components;
-		}
-		components = components || this.kindComponents || [];
-		this.inherited(arguments);
-		//this.$.scroll.kFrictionDamping = 0.75;
-		//this.$.scroll.kSpringDamping = 0.8;
-		//this.$.scroll.kFrictionEpsilon = 0.1;
-		this.views = this.views.length ? this.views : components;
-		this.viewsChanged();
-	},
-	rendered: function() {
-		this.inherited(arguments);
-		this.resize();
-		this.dragSnapThresholdChanged();
-	},
-	layoutKindChanged: function() {
-		this.inherited(arguments);
-		this.setVertical(!this.scrollH);
-		this.setHorizontal(this.scrollH);
-	},
-	dragSnapThresholdChanged: function() {
-		this.dragSnapWidth = (this.scrollH ? this._controlSize.width : this._controlSize.height) * this.dragSnapThreshold;
-	},
-	dragstartHandler: function() {
-		if (this.snapping || this.dragging) {
-			// the next view is not ready so we don't want to let user to drag but also want to prevent click
-			this._preventClick = true;
-			return this.preventDragPropagation;
-		}
-		return this.inherited(arguments);
-	},
-	dragfinishHandler: function(inSender, inEvent) {
-		if (this._preventClick) {
-			this._preventClick = false;
-			inEvent.preventClick();
+	importProps: function(inProps) {
+		if (inProps.components) {
+			inProps.items = inProps.items ? inProps.items.concat(inProps.components) : inProps.components;
+			inProps.components = [];
 		}
 		this.inherited(arguments);
 	},
-	flickHandler: function(inSender, e) {
-		if (this.snapping) {
-			return this.preventDragPropagation;
-		}
-		return this.inherited(arguments);
+	componentsReady: function() {
+		this.inherited(arguments);
+		this.canCreateItems = true;
+		this.itemsChanged();
 	},
-	viewsChanged: function() {
+	// NOTE: default MenuItem.onclick
+	menuItemClick: function(inSender) {
+		this._itemClicked = true;
+		this.setSelected(inSender);
+	},
+	itemsChanged: function() {
+		this.selected = null;
+		if (this.canCreateItems) {
+			this.createItems();
+		}
+	},
+	createItems: function() {
 		this.destroyControls();
-		this.createViews(this.views);
+		for (var i=0, item, c; item=this.items[i]; i++) {
+			item = enyo.isString(item) ? {caption: item} : item;
+			// we want these controls to be owned by us so we get events
+			this.createComponent(item);
+		}
 		if (this.generated) {
 			this.render();
 		}
+		this.hasItems = true;
 	},
-	createViews: function(inViews) {
-		for (var i=0, v; v=inViews[i]; i++) {
-			this.createView(this, v);
+	selectedChanged: function(inOldValue) {
+		enyo.call(this.selected, "setSelected", [true]);
+		if (inOldValue != this.selected) {
+			enyo.call(inOldValue, "setSelected", [false]);
+		}
+		if (this._itemClicked) {
+			this._itemClicked = false;
+			this.doSelect(this.selected, inOldValue);
+
 		}
 	},
-	createView: function(inManger, inInfo, inMoreInfo) {
-		var info = enyo.mixin(this.constructViewInfo(inInfo), inMoreInfo);
-		var c = inManger.createComponent(info);
-		enyo.call(c, "setOuterScroller", [this]);
-		return c;
+	fetchItemByValue: function(inValue) {
+		return !this.hasItems ? this.fetchItemDataByValue(inValue) : this.inherited(arguments);
 	},
-	constructViewInfo: function(inInfo) {
-		return enyo.isString(inInfo) ? {src: inInfo} : inInfo;
-	},
-	//* @public
-	/**
-	 Adds additional views to the carousel.
-	 @param {Object} inViews
-	 */
-	addViews: function(inViews) {
-		this.views = this.views.concat(inViews);
-		this.createViews(inViews);
-		this.contentChanged();
-	},
-	/**
-	 Event handler for resize; if we're the root component, we'll automatically resize.
-	 */
-	resizeHandler: function() {
-		this.resize();
-		// we don't want to inherit resizeHandler from BasicScroller here since
-		// resizeHandler in BasicScroller calls start() which may change the scroll pos and thus
-		// causing a snap to occur.
-		this.broadcastToControls("resize");
-	},
-	/**
-	 Handles size changes.  This method can be hooked up to a resizeHandler.
-	 */
-	resize: function() {
-		this.sizeControls("100%", "100%");
-		this.measureControlSize();
-		this._controlSize[this.scrollH ? "width" : "height"] = this._controlSize[this.scrollH ? "width" : "height"] - 2*this.revealAmount;
-		this.sizeControls(this._controlSize.width+"px", this._controlSize.height+"px", true);
-		// don't need to adjust the index since it is already adjusting
-		if (!this.snapping) {
-			this.setIndex(this.index);
-		}
-	},
-	//* @protected
-	measureControlSize: function() {
-		this._controlSize = this.getBounds();
-		// FIXME: in case there is no size for this, try to get the next available size.
-		if (!this._controlSize.width || !this._controlSize.height) {
-			var cs = enyo.fetchControlSize(this);
-			this._controlSize = {width: cs.w, height: cs.h};
-		}
-	},
-	sizeControls: function(inWidth, inHeight, inReset) {
-		for (var i=0, c$=this.getControls(), c; c=c$[i]; i++) {
-			inWidth && c.applyStyle("width", inWidth);
-			inHeight && c.applyStyle("height", inHeight);
-			inReset && this.resetView(i);
-		}
-	},
-	calcPos: function(inIndex) {
-		if (!this.getControls()[inIndex]) {
-			return;
-		}
-		var pos = 0, s = this._controlSize[this.scrollH ? "width" : "height"];
-		for (var i=0, c$=this.getControls(), c; (i<inIndex) && (c=c$[i]); i++) {
-			if (c.showing) {
-				pos += s;
+	fetchItemDataByValue: function(inValue) {
+		for (var i=0, items=this.items, c; c=items[i]; i++) {
+			c.value = c.value || c.caption;
+			if (c.value == inValue) {
+				return c;
 			}
 		}
-		return pos;
 	},
-	snapFinish: function() {
-		this.resetView(this.oldIndex);
-		this.inherited(arguments);
-	},
-	snapTo: function(inIndex) {
-		this.inherited(arguments);
-		// make sure the center item is reset
-		if (this.index != this.oldIndex) {
-			this.resetView(this.index);
-		}
-	},
-	findView: function(inControl) {
-		return inControl;
-	},
-	applyToView: function(inControl, inMethod, inArgs) {
-		var v = inControl[inMethod] ? inControl : this.findView(inControl);
-		enyo.call(v, inMethod, inArgs);
-	},
-	resetView: function(inIndex) {
-		var c = this.getControls()[inIndex];
-		if (c) {
-			this.applyToView(c, "reset", []);
-		}
-	}
-});
-
-enyo.kind({
-	name: "CustomCarouselInternal",
-	kind: "CustomBasicCarousel",
-	components: [
-		{name: "left", kind: "Control"},
-		{name: "center", kind: "Control"},
-		{name: "right", kind: "Control"}
-	],
-	centerIndex: 1,
-	/**
-	 Fetches the view corresponding to the view position "center", "left" or "right".
-	 "center" would always refer to the view currently displayed.  "left" and "right" would be the left/right of currently displayed.
-	 Use this function to update the view already being shown.
-	 @param {String} position of the view to be fetched.  Possible values are "center", "left" or "right".
-	 */
-	fetchView: function(inViewPos) {
-		var vm = {left: 0, center: 1, right: 2};
-		var i = vm[inViewPos];
-		i = this.index === 0 ? i-1 : (this.index == 2 ? i+1 : i);
-		var c = this.getControls()[i];
-		return c ? this.findView(c) : null;
-	},
-	/**
-	 Returns the currently displayed view.
-	 */
-	fetchCurrentView: function() {
-		return this.fetchView("center");
-	},
-	//* @protected
-	newView: function(inViewHolder, inInfo, inRender) {
-		inViewHolder.setShowing(inInfo ? true : false);
-		if (inInfo) {
-			inViewHolder.destroyControls();
-			this.createView(inViewHolder, inInfo, {
-				kind: inInfo.kind || this.defaultKind, owner: this.owner, width: "100%", height: "100%", accelerated: this.accelerated
-			});
-			inRender && inViewHolder.render();
-		}
-	},
-	moveView: function(inViewHolder, inView) {
-		if (!inViewHolder.showing) {
-			inViewHolder.show();
-		}
-		inView.setContainer(inViewHolder);
-		inView.setParent(inViewHolder);
-	},
-	findView: function(inControl) {
-		var c = inControl.getControls();
-		if (c.length) {
-			return c[0];
-		}
-	},
-	scrollStop: function() {
-		this.inherited(arguments);
-		if (!this._controlSize) {
-			return;
-		}
-		var s = this.scrollH ? this._controlSize.width : this._controlSize.height;
-		if (this.startPos && (this.pos >= this.startPos + s || this.pos <= this.startPos - s) && this.index == 1 && this.oldIndex == this.index) {
-			// scroll pass the next view so need to trigger snapFinish manually
-			this.index = this.index + (this.startPos < this.pos ? 1 : -1);
-			this.snapFinish();
-		}
-	},
-	snapFinish: function() {
-		this.adjustViews();
-		this.inherited(arguments);
-	},
-	previous: function() {
-		if (this.index !== 1 || this.$.left.showing) {
-			this.inherited(arguments);
-		}
-	},
-	next: function() {
-		if (this.index !== 1 || this.$.right.showing) {
-			this.inherited(arguments);
-		}
-	}
-});
-
-/**
-A control that provides the ability to slide back and forth between different views without having to load all the views initially.
-
-A single carousel could contain thousands of views/images.  Loading all of them into memory at once would not be feasible.
-Carousel solves this problem by only holding onto the center view (C), the previous view (P), and the next view (N).
-Additional views are loaded as the user flips through the items in the Carousel.
-
-	| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
-	              P   C   N
-
-To initialize a carousel:
-
-	{kind: "Carousel", flex: 1, onGetLeft: "getLeft", onGetRight: "getRight"}
-
-Use <code>setCenterView</code> to set the center view, and the <code>onGetLeft</code> and <code>onGetRight</code> events to build a scrolling list of views.
-
-	create: function() {
-		this.inherited(arguments);
-		this.$.carousel.setCenterView(this.getView(this.index));
-	},
-	getView: function(inIndex) {
-		return {kind: "HFlexBox", align: "center", pack: "center", content: inIndex};
-	},
-	getLeft: function(inSender, inSnap) {
-		inSnap && this.index--;
-		return this.getView(this.index-1);
-	},
-	getRight: function(inSender, inSnap) {
-		inSnap && this.index++;
-		return this.getView(this.index+1);
-	}
-*/
-enyo.kind({
-	name: "CustomCarousel",
-	kind: "CustomCarouselInternal",
-	events: {
-		/**
-		 Gets the left view and also indicates if it is fired after a left transition.
-		 */
-		onGetLeft: "",
-		/**
-		 Gets the right view and also indicates if it is fired after a right transition.
-		 */
-		onGetRight: ""
-	},
-	/**
-	 Sets the view to be used as the center view.
-	 This function will create the center view and fires events onGetLeft and onGetRight to get the view infos
-	 for creating left and right views.
-	 @param {Object} inInfo A config block describing the view control.
-	 */
-	setCenterView: function(inInfo) {
-		this.newView(this.$.left, this.doGetLeft(false));
-		this.newView(this.$.center, inInfo);
-		this.newView(this.$.right, this.doGetRight(false));
-		this.index = this.centerIndex;
-		if (this.hasNode()) {
-			this.render();
-		}
-	},
-	//* @protected
-	adjustViews: function() {
-		var goRight = this.index > this.oldIndex, src;
-		if (this.index != this.centerIndex || !this._info) {
-			this._info = this["doGet" + (goRight ? "Right" : "Left")](true);
-		}
-		if (this.index != this.centerIndex) {
-			if (this._info) {
-				var vh1 = goRight ? this.$.right : this.$.left;
-				var vh2 = goRight ? this.$.left : this.$.right;
-				var v = this.findView(this.$.center);
-				this.moveView(this.$.center, this.findView(vh1));
-				this.newView(vh1, this._info, true);
-				vh2.destroyControls();
-				this.moveView(vh2, v);
-				this.setIndex(this.centerIndex);
-			}
-		}
+	scrollToSelected: function() {
+		var b = this.selected.getBounds();
+		this.scrollIntoView(b.top);
 	}
 });
