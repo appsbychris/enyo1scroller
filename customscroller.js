@@ -114,10 +114,10 @@ var vy = (this.y - this.flicky) / dragT1 * 1200;
 var v = Math.sqrt(vx*vx + vy*vy);
 
 if (v > 600 && dragT1 < 300) {
-	/*if (ISPHONE) {
-		vx=vx*2
-		vy=vy*2
-	}*/
+	if (ISPHONE) {
+		vx=vx*2;
+		vy=vy*2;
+	}
     this.flick({xVel:vx, yVel:vy});
 }
 },
